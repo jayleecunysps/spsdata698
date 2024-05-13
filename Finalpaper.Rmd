@@ -1,0 +1,209 @@
+---
+title: "Untitled"
+author: "Jay Lee"
+date: "2024-03-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r include=FALSE}
+library(readr)
+library(gridExtra)
+library(grid)
+library(tidyverse)
+library(tidymodels)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(corrplot)
+library(RColorBrewer)
+library(ggplot2)
+library(ggforce)
+library(e1071)
+library(factoextra) # for clustering visualization
+library(cluster) # for clustering algorithms
+library(ClustOfVar)
+library(fastDummies)
+library(dplyr)
+library(randomForest) # for Isolation Forest
+library(anomalize) # for anomaly detection
+
+```
+
+```{r}
+# Specify the file path
+file_path <- "/Users/jaylee/Downloads/100000-Patients/AdmissionsDiagnosesCorePopulatedTable.txt"
+# Read the data into a data frame (assuming it's tab-separated)
+data_frame <- read.table(file_path, header = TRUE, sep = "\t")
+summary(data_frame)
+
+HCC <- read.csv("/Users/jaylee/Downloads/2024 Midyear_Final ICD-10-CM Mappings.csv")
+```
+
+Dx level
+```{r}
+DXcounts_Perdx <- count(data_frame,PrimaryDiagnosisCode)
+countofcountsdx <- count(DXcounts_Perdx,n)
+countofcountsdx$countoftotalDxinclm <- countofcountsdx$n
+countofcountsdx$count <- countofcountsdx$nn
+countofcountsdx <- countofcountsdx[, c(3:4)]
+```
+
+
+```{r}
+boxplot(DXcounts_Perdx$n, main = "Boxplot of Counts of Dx received",
+        xlab = "Count", ylab = "Values", outline = TRUE)
+```
+```{r}
+# Calculate quartiles and IQR
+Q1 <- quantile(DXcounts_Perdx$n, 0.25)
+Q3 <- quantile(DXcounts_Perdx$n, 0.75)
+IQR <- Q3 - Q1
+
+# Define lower and upper bounds for outliers
+lower_bound <- Q1 - 1.5 * IQR
+lower_bound
+lower_boundDx <- DXcounts_Perdx$n < lower_bound
+# Get the patient IDs of outliers
+lower_bound_dx <- DXcounts_Perdx$PrimaryDiagnosisCode[lower_boundDx]
+
+# Print or analyze the outliers
+print(lower_bound_dx)
+
+
+```
+
+
+
+count level
+```{r}
+DXcounts_Permb <- count(data_frame,PatientID)
+countofcounts <- count(DXcounts_Permb,n)
+countofcounts$countoftotalDxreceived <- countofcounts$n
+countofcounts$count <- countofcounts$nn
+countofcounts <- countofcounts[, c(3:4)]
+```
+```{r}
+barplot(countofcounts$count, names.arg = countofcounts$countoftotalDxreceived,
+        main = "Barplot of Total Dx Received", xlab = "Count of Total Dxs per Patient", ylab = "Count")
+```
+```{r}
+boxplot(DXcounts_Permb$n, main = "Boxplot of Counts of Dx received",
+        xlab = "Count", ylab = "Values", outline = TRUE)
+```
+
+```{r}
+# Calculate quartiles and IQR
+Q1 <- quantile(DXcounts_Permb$n, 0.25)
+Q3 <- quantile(DXcounts_Permb$n, 0.75)
+IQR <- Q3 - Q1
+
+# Define lower and upper bounds for outliers
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+
+# Identify outliers
+outliers <- DXcounts_Permb$n < lower_bound | DXcounts_Permb$n > upper_bound
+
+# Print outliers
+outliers_table<-DXcounts_Permb[outliers, ]
+outliers_table
+```
+
+```{r}
+DXcounts_outlier <- count(outliers_table,n)
+DXcounts_outlier$outlier_dxcount <- DXcounts_outlier$n
+DXcounts_outlier$outlier_count <- DXcounts_outlier$nn
+DXcounts_outlier <- DXcounts_outlier[, c(3:4)]
+DXcounts_outlier
+```
+
+```{r}
+barplot(DXcounts_outlier$outlier_count, names.arg = DXcounts_outlier$outlier_dxcount,
+        main = "Count of total Dx outlier", xlab = "Count of total Dx", ylab = "Count")
+```
+
+```{r}
+grouped_df <- data_frame %>%
+  group_by(PatientID) %>%
+  summarise(GroupedDiagnosisCodes = paste(PrimaryDiagnosisCode, collapse = ", "))
+```
+
+
+```{r}
+df_split <- separate(grouped_df, GroupedDiagnosisCodes, into = c("Diagnosis1", "Diagnosis2", "Diagnosis3","Diagnosis4","Diagnosis5","Diagnosis6","Diagnosis7","Diagnosis8","Diagnosis9","Diagnosis10","Diagnosis11","Diagnosis12"), sep = ",")
+
+
+```
+
+```{r}
+non_na_counts <- colSums(!is.na(df_split))
+print(non_na_counts)
+df_touse <- df_split[, c(1:6)]
+df_touse <- na.omit(df_touse)
+
+```
+
+
+```{r echo=TRUE}
+library(e1071)
+
+# Assuming 'data' contains the patient data
+
+# Select diagnosis columns
+diagnosis_columns <- c("Diagnosis1", "Diagnosis2", "Diagnosis3", "Diagnosis4", "Diagnosis5")
+
+# Convert diagnosis codes to factors (if not already)
+diagnosis_data <- df_touse %>% select(all_of(diagnosis_columns))
+
+# Perform one-hot encoding
+diagnosis_data <- lapply(diagnosis_data, function(x) {
+  as.integer(factor(x, levels = unique(unlist(diagnosis_data))))
+})
+
+# Combine the encoded columns into a single data frame
+diagnosis_data <- do.call(cbind, diagnosis_data)
+
+# Perform anomaly detection using One-Class SVM
+model <- svm(diagnosis_data, type = "one-class", kernel = "radial")
+
+# Set a threshold for anomaly score
+threshold <-0.5
+
+# Predict anomaly scores
+anomaly_scores <- predict(model, diagnosis_data, decision.values = TRUE)
+
+# Get outlier indices
+outliers <- which(anomaly_scores > threshold)
+
+# Get the patient IDs of outliers
+outlier_patient_ids <- df_touse$PatientID[outliers]
+
+# Print or analyze the outliers
+
+summary(outlier_patient_ids)
+```
+
+
+```{r}
+
+# Train isolation forest model
+model2 <- randomForest(diagnosis_data[, -1], ntree = 100, proximity = TRUE, seed = 1)
+
+# Calculate anomaly score
+proximity_matrix <- model2$proximity
+anomaly_score <- apply(proximity_matrix, 1, mean)
+
+# Define threshold for anomalies
+threshold <- quantile(anomaly_score, 0.95)
+
+# Predict anomalies
+anomalies <- ifelse(anomaly_score > threshold, 1, 0)
+
+# Extract rows with anomalies
+anomaly_rows <- df_touse[anomalies == 1, , drop = FALSE]
+
+nrow(anomaly_rows)
+```
